@@ -1,0 +1,248 @@
+"""Custom exception hierarchy for PharmaAssist microservice.
+
+Provides domain-specific exceptions with proper HTTP status codes and
+error categorization for production-grade error handling and monitoring.
+"""
+
+from typing import Any, Dict, Optional
+
+
+class PharmaAssistantError(Exception):
+    """Base exception for all PharmaAssist application errors.
+    
+    All custom exceptions should inherit from this class to ensure
+    consistent error handling and logging across the service.
+    """
+    
+    def __init__(
+        self,
+        message: str,
+        error_code: str = "INTERNAL_ERROR",
+        status_code: int = 500,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Initialize PharmaAssist base exception.
+        
+        Args:
+            message: Human-readable error description
+            error_code: Machine-readable error code for client handling
+            status_code: HTTP status code to return
+            details: Additional error context for debugging
+        """
+        self.message = message
+        self.error_code = error_code
+        self.status_code = status_code
+        self.details = details or {}
+        super().__init__(self.message)
+
+
+class ValidationError(PharmaAssistantError):
+    """Request validation failure - invalid input data.
+    
+    Used when client input fails schema validation or business rule checks.
+    """
+    
+    def __init__(
+        self,
+        message: str = "Validation error",
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(
+            message=message,
+            error_code="VALIDATION_ERROR",
+            status_code=422,
+            details=details,
+        )
+
+
+class NotFoundError(PharmaAssistantError):
+    """Resource not found error.
+    
+    Used when requested entity doesn't exist in any data store.
+    """
+    
+    def __init__(
+        self,
+        message: str = "Resource not found",
+        resource_type: Optional[str] = None,
+        resource_id: Optional[str] = None,
+    ) -> None:
+        details = {}
+        if resource_type:
+            details["resource_type"] = resource_type
+        if resource_id:
+            details["resource_id"] = resource_id
+        super().__init__(
+            message=message,
+            error_code="NOT_FOUND",
+            status_code=404,
+            details=details,
+        )
+
+
+class DrugNotFoundError(NotFoundError):
+    """Specific error for drug not found scenarios."""
+    
+    def __init__(self, drug_name: str) -> None:
+        super().__init__(
+            message=f"Drug not found: {drug_name}",
+            resource_type="drug",
+            resource_id=drug_name,
+        )
+
+
+class InteractionCheckError(PharmaAssistantError):
+    """Drug interaction check processing error.
+    
+    Used when the interaction checker encounters processing issues
+    or conflicting drug combinations.
+    """
+    
+    def __init__(
+        self,
+        message: str = "Error checking drug interactions",
+        conflicting_drugs: Optional[list] = None,
+    ) -> None:
+        details = {}
+        if conflicting_drugs:
+            details["conflicting_drugs"] = conflicting_drugs
+        super().__init__(
+            message=message,
+            error_code="INTERACTION_CHECK_ERROR",
+            status_code=400,
+            details=details,
+        )
+
+
+class DatabaseError(PharmaAssistantError):
+    """Database operation error.
+    
+    Wraps underlying database driver exceptions for consistent handling.
+    """
+    
+    def __init__(
+        self,
+        message: str = "Database error occurred",
+        original_error: Optional[Exception] = None,
+    ) -> None:
+        details = {}
+        if original_error:
+            details["original_error"] = str(original_error)
+            details["error_type"] = type(original_error).__name__
+        super().__init__(
+            message=message,
+            error_code="DATABASE_ERROR",
+            status_code=503,
+            details=details,
+        )
+
+
+class AWSServiceError(PharmaAssistantError):
+    """AWS service integration error.
+    
+    Used when AWS SDK calls fail (Bedrock, Comprehend, SQS, etc.).
+    """
+    
+    def __init__(
+        self,
+        message: str = "AWS service error",
+        service_name: Optional[str] = None,
+        original_error: Optional[Exception] = None,
+    ) -> None:
+        details = {}
+        if service_name:
+            details["service"] = service_name
+        if original_error:
+            details["original_error"] = str(original_error)
+        super().__init__(
+            message=message,
+            error_code="AWS_SERVICE_ERROR",
+            status_code=502,
+            details=details,
+        )
+
+
+class BedrockInvocationError(AWSServiceError):
+    """Amazon Bedrock model invocation error."""
+    
+    def __init__(
+        self,
+        message: str = "Bedrock model invocation failed",
+        model_id: Optional[str] = None,
+        original_error: Optional[Exception] = None,
+    ) -> None:
+        super().__init__(
+            message=message,
+            service_name="Bedrock",
+            original_error=original_error,
+        )
+        if model_id:
+            self.details["model_id"] = model_id
+
+
+class RateLimitExceededError(PharmaAssistantError):
+    """Rate limit exceeded error.
+    
+    Used when client exceeds configured rate limits.
+    """
+    
+    def __init__(
+        self,
+        message: str = "Rate limit exceeded",
+        retry_after_seconds: int = 60,
+    ) -> None:
+        super().__init__(
+            message=message,
+            error_code="RATE_LIMIT_EXCEEDED",
+            status_code=429,
+            details={"retry_after_seconds": retry_after_seconds},
+        )
+
+
+class AuthenticationError(PharmaAssistantError):
+    """Authentication failure error."""
+    
+    def __init__(self, message: str = "Authentication failed") -> None:
+        super().__init__(
+            message=message,
+            error_code="AUTHENTICATION_ERROR",
+            status_code=401,
+        )
+
+
+class AuthorizationError(PharmaAssistantError):
+    """Authorization failure error - insufficient permissions."""
+    
+    def __init__(
+        self,
+        message: str = "Insufficient permissions",
+        required_permission: Optional[str] = None,
+    ) -> None:
+        details = {}
+        if required_permission:
+            details["required_permission"] = required_permission
+        super().__init__(
+            message=message,
+            error_code="AUTHORIZATION_ERROR",
+            status_code=403,
+            details=details,
+        )
+
+
+class PHIDetectedError(PharmaAssistantError):
+    """PHI (Protected Health Information) detected in unsecured context."""
+    
+    def __init__(
+        self,
+        message: str = "PHI detected in request",
+        phi_fields: Optional[list] = None,
+    ) -> None:
+        details = {}
+        if phi_fields:
+            details["phi_fields"] = phi_fields
+        super().__init__(
+            message=message,
+            error_code="PHI_DETECTED",
+            status_code=400,
+            details=details,
+        )
