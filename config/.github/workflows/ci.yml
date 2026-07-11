@@ -1,0 +1,220 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  PYTHON_VERSION: '3.11'
+  POETRY_VERSION: '1.7.1'
+  AWS_REGION: us-east-1
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Code Quality Checks
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      
+      - name: Install Poetry
+        run: |
+          curl -sSL https://install.python-poetry.org | python3 -
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+      
+      - name: Install dependencies
+        run: poetry install --with dev
+      
+      - name: Run Ruff linter
+        run: poetry run ruff check src/ tests/
+      
+      - name: Run Black formatter check
+        run: poetry run black --check src/ tests/
+      
+      - name: Run isort check
+        run: poetry run isort --check-only src/ tests/
+      
+      - name: Run mypy type checker
+        run: poetry run mypy src/ --strict
+      
+      - name: Run Bandit security scan
+        run: poetry run bandit -c pyproject.toml -r src/
+
+  # ---------------------------------------------------------------------------
+  # Unit Tests
+  # ---------------------------------------------------------------------------
+  test:
+    name: Unit Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    needs: lint
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.12']
+    
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: pharma_test
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      
+      - name: Install Poetry
+        run: |
+          curl -sSL https://install.python-poetry.org | python3 -
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+      
+      - name: Install dependencies
+        run: poetry install --with dev
+      
+      - name: Run unit tests
+        env:
+          POSTGRES_HOST: localhost
+          POSTGRES_DB: pharma_test
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_password
+          REDIS_HOST: localhost
+          REDIS_PORT: 6379
+          APP_ENV: test
+        run: |
+          poetry run pytest tests/unit/ \
+            -v \
+            --cov=src \
+            --cov-report=term-missing \
+            --cov-report=xml \
+            --junitxml=junit.xml
+      
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage.xml
+          flags: unittests
+      
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: test-results-${{ matrix.python-version }}
+          path: junit.xml
+
+  # ---------------------------------------------------------------------------
+  # Docker Build & Scan
+  # ---------------------------------------------------------------------------
+  docker:
+    name: Docker Build & Security Scan
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.prod
+          push: false
+          load: true
+          tags: pharma-assistant:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: pharma-assistant:ci
+          format: sarif
+          output: trivy-results.sarif
+          severity: HIGH,CRITICAL
+      
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+      
+      - name: Run Dockle container linter
+        uses: hands-lab/dockle-action@v1
+        with:
+          image: pharma-assistant:ci
+          exit-code: 1
+          exit-level: WARN
+
+  # ---------------------------------------------------------------------------
+  # Infrastructure Validation
+  # ---------------------------------------------------------------------------
+  terraform-validate:
+    name: Terraform Validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.6.0"
+      
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive infrastructure/terraform/
+      
+      - name: Terraform Init
+        run: |
+          cd infrastructure/terraform/environments/dev
+          terraform init -backend=false
+      
+      - name: Terraform Validate
+        run: |
+          cd infrastructure/terraform/environments/dev
+          terraform validate
+
+  # ---------------------------------------------------------------------------
+  # Build Summary
+  # ---------------------------------------------------------------------------
+  summary:
+    name: CI Summary
+    runs-on: ubuntu-latest
+    needs: [lint, test, docker, terraform-validate]
+    if: always()
+    steps:
+      - name: Check results
+        run: |
+          echo "## CI Pipeline Results" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Lint: ${{ needs.lint.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Tests: ${{ needs.test.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Docker: ${{ needs.docker.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Terraform: ${{ needs.terraform-validate.result }}" >> $GITHUB_STEP_SUMMARY
